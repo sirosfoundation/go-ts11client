@@ -21,11 +21,26 @@ type TS11Document struct {
 	Data             []byte
 }
 
+// SkipReason categorizes why FetchTS11Schemas skipped an item, so callers
+// can log/monitor each distinctly instead of treating every skip as an
+// identical generic failure.
+type SkipReason int
+
+const (
+	// SkipReasonNoSchemaURIs means a schema declared no schemaURIs at
+	// all, so no document fetch was even attempted.
+	SkipReasonNoSchemaURIs SkipReason = iota
+	// SkipReasonFetchFailed means a specific format document's fetch
+	// (or read) failed.
+	SkipReasonFetchFailed
+)
+
 // SkippedDocument records one schema/format document that couldn't be
 // fetched or was otherwise skipped, so callers can still log or monitor
 // individual failures even though FetchTS11Schemas itself treats them as
 // non-fatal.
 type SkippedDocument struct {
+	Reason           SkipReason
 	SchemaID         string
 	FormatIdentifier string
 	URI              string
@@ -52,20 +67,30 @@ func FetchTS11Schemas(ctx context.Context, httpClient *http.Client, endpointURL 
 		httpClient = http.DefaultClient
 	}
 
+	body, err := fetchURL(ctx, httpClient, endpointURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ts11client: fetch schemas page from %s: %w", endpointURL, err)
+	}
+	return FetchTS11SchemasFromFirstPage(ctx, httpClient, endpointURL, body)
+}
+
+// FetchTS11SchemasFromFirstPage is FetchTS11Schemas for callers that
+// already fetched endpointURL's first-page body themselves - e.g. as part
+// of their own response-format auto-detection, before knowing this was a
+// TS11 schemas.json response. It reuses firstPageBody instead of fetching
+// endpointURL a second time, and only fetches subsequent pages (if any).
+func FetchTS11SchemasFromFirstPage(ctx context.Context, httpClient *http.Client, endpointURL string, firstPageBody []byte) ([]TS11Document, []SkippedDocument, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
 	var docs []TS11Document
 	var skipped []SkippedDocument
 	currentURL := endpointURL
+	body := firstPageBody
 	first := true
 
 	for {
-		body, err := fetchURL(ctx, httpClient, currentURL)
-		if err != nil {
-			if first {
-				return nil, nil, fmt.Errorf("ts11client: fetch schemas page from %s: %w", currentURL, err)
-			}
-			break
-		}
-
 		var page schemameta.TS11SchemasPage
 		if err := json.Unmarshal(body, &page); err != nil {
 			if first {
@@ -78,6 +103,7 @@ func FetchTS11Schemas(ctx context.Context, httpClient *http.Client, endpointURL 
 		for _, schema := range page.Entries() {
 			if len(schema.SchemaURIs) == 0 {
 				skipped = append(skipped, SkippedDocument{
+					Reason:   SkipReasonNoSchemaURIs,
 					SchemaID: schema.ID,
 					Err:      fmt.Errorf("schema has no schemaURIs"),
 				})
@@ -87,6 +113,7 @@ func FetchTS11Schemas(ctx context.Context, httpClient *http.Client, endpointURL 
 				data, err := fetchURL(ctx, httpClient, su.URI)
 				if err != nil {
 					skipped = append(skipped, SkippedDocument{
+						Reason:           SkipReasonFetchFailed,
 						SchemaID:         schema.ID,
 						FormatIdentifier: su.FormatIdentifier,
 						URI:              su.URI,
@@ -107,6 +134,11 @@ func FetchTS11Schemas(ctx context.Context, httpClient *http.Client, endpointURL 
 			break
 		}
 		currentURL = page.NextPageURL(currentURL)
+		nextBody, err := fetchURL(ctx, httpClient, currentURL)
+		if err != nil {
+			break
+		}
+		body = nextBody
 	}
 
 	return docs, skipped, nil

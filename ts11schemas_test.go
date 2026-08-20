@@ -2,8 +2,10 @@ package ts11client
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -160,6 +162,71 @@ func TestFetchTS11Schemas_SchemaWithNoSchemaURIsIsSkippedAndReported(t *testing.
 	require.Len(t, skipped, 1)
 	assert.Equal(t, "empty", skipped[0].SchemaID)
 	assert.Error(t, skipped[0].Err)
+}
+
+func TestFetchTS11SchemasFromFirstPage_SkipsRedundantFirstPageFetch(t *testing.T) {
+	var fetchCount atomic.Int64
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mux.HandleFunc("/doc.json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"vct":"urn:demo:1"}`))
+	})
+	mux.HandleFunc("/api/v1/schemas.json", func(w http.ResponseWriter, r *http.Request) {
+		fetchCount.Add(1)
+		_, _ = w.Write([]byte(`{"data":[{"id":"s1","schemaURIs":[{"formatIdentifier":"dc+sd-jwt","uri":"` + srv.URL + `/doc.json"}]}],"total":1,"limit":100,"offset":0}`))
+	})
+
+	endpointURL := srv.URL + "/api/v1/schemas.json"
+	firstPageBody, err := io.ReadAll(mustGet(t, srv.Client(), endpointURL))
+	require.NoError(t, err)
+	require.Equal(t, int64(1), fetchCount.Load(), "the caller's own fetch (simulating format auto-detection) should be the only hit so far")
+
+	docs, skipped, err := FetchTS11SchemasFromFirstPage(context.Background(), srv.Client(), endpointURL, firstPageBody)
+	require.NoError(t, err)
+	require.Empty(t, skipped)
+	require.Len(t, docs, 1)
+	assert.Contains(t, string(docs[0].Data), "urn:demo:1")
+	assert.Equal(t, int64(1), fetchCount.Load(), "FetchTS11SchemasFromFirstPage must not re-fetch the first page")
+}
+
+func mustGet(t *testing.T, client *http.Client, url string) io.Reader {
+	t.Helper()
+	resp, err := client.Get(url) //nolint:noctx
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp.Body
+}
+
+func TestFetchTS11Schemas_ReasonDistinguishesNoSchemaURIsFromFetchFailure(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mux.HandleFunc("/missing.json", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/api/v1/schemas.json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"data": [
+				{"id":"empty"},
+				{"id":"broken","schemaURIs":[{"formatIdentifier":"dc+sd-jwt","uri":"` + srv.URL + `/missing.json"}]}
+			],
+			"total": 2, "limit": 100, "offset": 0
+		}`))
+	})
+
+	_, skipped, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/api/v1/schemas.json")
+	require.NoError(t, err)
+	require.Len(t, skipped, 2)
+
+	byID := map[string]SkippedDocument{}
+	for _, s := range skipped {
+		byID[s.SchemaID] = s
+	}
+	assert.Equal(t, SkipReasonNoSchemaURIs, byID["empty"].Reason)
+	assert.Equal(t, SkipReasonFetchFailed, byID["broken"].Reason)
 }
 
 func TestFetchTS11Schemas_FirstPageFetchFailureIsFatal(t *testing.T) {
