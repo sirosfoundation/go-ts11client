@@ -38,7 +38,7 @@ func TestFetchTS11Schemas_SinglePageMultiFormat(t *testing.T) {
 		_, _ = w.Write([]byte(`{"doctype":"org.demo.cred"}`))
 	})
 
-	docs, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/api/v1/schemas.json")
+	docs, _, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/api/v1/schemas.json")
 	require.NoError(t, err)
 	require.Len(t, docs, 2)
 
@@ -78,7 +78,7 @@ func TestFetchTS11Schemas_FollowsOffsetPagination(t *testing.T) {
 		}`))
 	})
 
-	docs, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/api/v1/schemas.json")
+	docs, _, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/api/v1/schemas.json")
 	require.NoError(t, err)
 	require.Len(t, docs, 2)
 	assert.Contains(t, string(docs[0].Data), "urn:demo:1")
@@ -108,7 +108,7 @@ func TestFetchTS11Schemas_FollowsLegacyNextPagination(t *testing.T) {
 		}`))
 	})
 
-	docs, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/page1")
+	docs, _, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/page1")
 	require.NoError(t, err)
 	require.Len(t, docs, 2)
 	assert.Contains(t, string(docs[0].Data), "urn:legacy:1")
@@ -136,10 +136,30 @@ func TestFetchTS11Schemas_SkipsFailedDocumentButKeepsOthers(t *testing.T) {
 		}`))
 	})
 
-	docs, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/api/v1/schemas.json")
+	docs, skipped, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/api/v1/schemas.json")
 	require.NoError(t, err)
 	require.Len(t, docs, 1, "the failed document must be skipped, not fail the whole fetch")
 	assert.Contains(t, string(docs[0].Data), "urn:ok")
+	require.Len(t, skipped, 1, "the skip must still be reported so callers can log/monitor it")
+	assert.Equal(t, "broken", skipped[0].SchemaID)
+	assert.Error(t, skipped[0].Err)
+}
+
+func TestFetchTS11Schemas_SchemaWithNoSchemaURIsIsSkippedAndReported(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	mux.HandleFunc("/api/v1/schemas.json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data": [{"id":"empty"}], "total": 1, "limit": 100, "offset": 0}`))
+	})
+
+	docs, skipped, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/api/v1/schemas.json")
+	require.NoError(t, err)
+	assert.Empty(t, docs)
+	require.Len(t, skipped, 1)
+	assert.Equal(t, "empty", skipped[0].SchemaID)
+	assert.Error(t, skipped[0].Err)
 }
 
 func TestFetchTS11Schemas_FirstPageFetchFailureIsFatal(t *testing.T) {
@@ -148,6 +168,6 @@ func TestFetchTS11Schemas_FirstPageFetchFailureIsFatal(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/api/v1/schemas.json")
+	_, _, err := FetchTS11Schemas(context.Background(), srv.Client(), srv.URL+"/api/v1/schemas.json")
 	assert.Error(t, err)
 }
