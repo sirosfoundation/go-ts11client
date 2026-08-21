@@ -37,6 +37,15 @@ jobs:
           file: coverage.xml
           language: Go
           label: code-coverage/go-test
+          # Code Quality is a repo-level feature toggle (Settings > Code
+          # security > Code quality) separate from the branch-protection
+          # rule that requires it - until that's enabled, this upload
+          # fails with HTTP 403. Treat that as a warning, not a build
+          # failure, so CI doesn't go red for a setting outside this
+          # workflow's control. Once Code Quality is enabled, this can be
+          # removed (or set back to the default "true") so a genuine
+          # upload failure is caught again.
+          fail-on-error: false
 
   lint:
     name: Lint
