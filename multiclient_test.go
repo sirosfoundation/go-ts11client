@@ -20,8 +20,7 @@ import (
 func newTestRegistry(t *testing.T, credentials []testCredential) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
-	var srv *httptest.Server
-	srv = httptest.NewServer(mux)
+	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
 	index := map[string]any{"version": "2.0", "credentials": []map[string]any{}}
