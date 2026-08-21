@@ -13,6 +13,9 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      code-quality: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -20,11 +23,20 @@ jobs:
           go-version-file: go.mod
       - name: Run tests
         run: go test -v -race -coverprofile=cover.out -covermode=atomic ./...
-      - name: Upload coverage
+      - name: Upload coverage to Codecov
         if: github.event_name == 'push'
         uses: codecov/codecov-action@v7
         with:
           files: cover.out
+      - name: Convert coverage to Cobertura XML
+        run: |
+          go run github.com/boumenot/gocover-cobertura@v1.5.0 < cover.out > coverage.xml
+      - name: Upload code coverage
+        uses: actions/upload-code-coverage@v1
+        with:
+          file: coverage.xml
+          language: Go
+          label: code-coverage/go-test
 
   lint:
     name: Lint
